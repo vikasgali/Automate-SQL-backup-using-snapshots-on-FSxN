@@ -34,7 +34,7 @@ try {
 #Requires -Module AWS.Tools.SimpleSystemsManagement
 
 # $FSxID = 'fs-07a22f282fd4f5a20'
-# $FSxRegion = 'eu-south-2'
+# $FSxRegion = 'us-east-1'
 # $databaseName = "Belson,MultiDB"
 # $serverInstanceName = 'ENGINEERING'
 # $groupName = 'testgroup'
