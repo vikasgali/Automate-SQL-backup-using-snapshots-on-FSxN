@@ -7,7 +7,7 @@ The script fetches the disks assigned to SQL instance/databases and maps that ba
 
 The PowerShell script can be run at required schedule using SQL agent or Windows scheduler. Some of the pre-requisites are as below
 1. The script expects the FSx credentails to be saved as AWS SSM parameter as a secure way of storing and retreiving credentials. 
-	a. Create a parameter of type 'Secure String' with name as '/aws/filesystem/<FSxN filesystem ID>'
+	a. Create a parameter of type 'Secure String' with name as '/tsql/filesystem/<FSxN filesystem ID>'
 	b. For value enter the fsx credentials in JSON format as {fsx:{username:'fsxadmin',password:'password'}}
 2. AWS.Tools.SimpleSystemsManagement PowerShell module needs to be installed on the system where script is running.
 

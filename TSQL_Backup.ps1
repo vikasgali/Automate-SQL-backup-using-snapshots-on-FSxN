@@ -33,24 +33,23 @@ $includeLogVolumes = [System.Convert]::ToBoolean('false')
 try {
 #Requires -Module AWS.Tools.SimpleSystemsManagement
 
-# $FSxID = 'fs-07a22f282fd4f5a20'
-# $FSxRegion = 'us-east-1'
-# $databaseName = "Belson,MultiDB"
-# $serverInstanceName = 'ENGINEERING'
-# $groupName = 'testgroup'
-# $snapshot_timeout = 30
 $svmOntapUuid = ''
 $dblist = @()
 if(-not ([string]::IsNullOrEmpty($databaseName))) {
 $dblist = $databaseName.Split(",")
 $databaseList = ''
+$databaseqList = ''
 $dblist | ForEach-Object{
-   $db ="'"+$_+"'"
+   $db = $_
+   $dbgroup ="["+$db+"]"
+   $dbquote = "'"+$db+"'"
    if ([string]::IsNullOrEmpty($databaseList)){
-      $databaseList += $db
+      $databaseList += $dbgroup
+      $databaseqList += $dbquote
       }
     else {
-     $databaseList = $databaseList+','+$db 
+     $databaseList = $databaseList+','+$dbgroup
+     $databaseqList = $databaseqList+','+$dbquote 
     }
    }
 }
@@ -82,7 +81,7 @@ if ($connection -eq $False) {
 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\Software Publishing\" -Name State -Value 146944 -Force | Out-Null
 }
 #The solution is expecting that FSx credentials are saved in AWS SSM parameter store to have a safe and encrypted manner of passing credentials
-$SsmParameter = (Get-SSMParameter -Name "/aws/filesystem/$FSxID" -WithDecryption $True).Value | Out-String | ConvertFrom-Json
+$SsmParameter = (Get-SSMParameter -Name "/tsql/filesystem/$FSxID" -WithDecryption $True).Value | Out-String | ConvertFrom-Json
 $FSxUserName = $SsmParameter.fsx.username
 $FSxPassword = $SsmParameter.fsx.password
 $FSxPasswordSecureString = ConvertTo-SecureString $FSxPassword -AsPlainText -Force
@@ -311,10 +310,10 @@ Function Suspend-DatabasesForSnapshot {
         
         if($action -eq 'suspend') {
             if($BackupType -eq 'DATABASE') {                        
-                $sqlsuspend = "ALTER DATABASE $databaseName SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON;"
+                $sqlsuspend = "ALTER DATABASE $databaseList SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON;"
             } 
             if($BackupType -eq 'GROUP') {
-                $sqlsuspend = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (GROUP =($databaseName));"
+                $sqlsuspend = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (GROUP =($databaseList));"
             }
             if($BackupType -eq 'SERVER') {
                 $sqlsuspend = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON;"
@@ -328,11 +327,26 @@ Function Suspend-DatabasesForSnapshot {
             $success = $True
             } catch {
                  $attempt++
-                 Write-Host "Failed to suspend database(s) $databaseName"
+                 Write-Host "Failed to suspend database(s) $databaseList"
                  Write-Host $Error[0].Exception.InnerException.message
-                 Start-Sleep -Seconds 60
+                 Start-Sleep -Seconds 10
                  if($attempt -eq 5) {
-                     Write-Host "Failed to suspend database(s) $databaseName after $maxRetries attempts. Aborting!"
+                     Write-Host "Failed to suspend database(s) $databaseList after $maxRetries attempts. Aborting!"
+                     Write-Host "Resuming all databases in case of partial suspension with more than one database"
+                     if($BackupType -eq 'GROUP') {
+                         $sqlresume = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF (GROUP =($databaseList));"
+                        } 
+                     if($BackupType -eq 'SERVER'){
+                         $sqlresume = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF;"
+                        }
+
+                     try {
+                        $cmdsession.CommandText = $sqlresume   
+                        $resumedatabases = $cmdsession.ExecuteNonQuery(); 
+                        } catch {
+                        Write-Host "Failed to resume databases."
+                        Write-Host $Error[0].Exception.InnerException.message
+                        }
                      if ($Conn.State -eq [System.Data.ConnectionState]::Open) {
                         $Conn.Close()
                      }
@@ -346,10 +360,10 @@ Function Suspend-DatabasesForSnapshot {
 
         }else {
             if($BackupType -eq 'DATABASE') {                        
-                $sqlresume = "ALTER DATABASE $databaseName SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF;"
+                $sqlresume = "ALTER DATABASE [$databaseName] SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF;"
             } 
             if($BackupType -eq 'GROUP') {
-                $sqlresume = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF (GROUP =($databaseName));"
+                $sqlresume = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF (GROUP =($databaseList));"
             } 
             if($BackupType -eq 'SERVER'){
                 $sqlresume = "ALTER SERVER CONFIGURATION SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF;"
@@ -406,7 +420,7 @@ if(-not ([string]::IsNullOrEmpty($databaseName))) {
                 WHERE 
                     vs.volume_mount_point collate SQL_Latin1_General_CP1_CI_AS != 'C:\'
                     AND REVERSE(SUBSTRING(REVERSE(mf.physical_name), 1, 3)) in ('mdf','ndf','ldf')
-                    AND d.name collate SQL_Latin1_General_CP1_CI_AS IN ($databaseList)
+                    AND d.name collate SQL_Latin1_General_CP1_CI_AS IN ($databaseqList)
                 FOR JSON PATH)
                 SELECT @JSONData;
 "@
@@ -458,7 +472,7 @@ if(-not ([string]::IsNullOrEmpty($databaseName))) {
     $volumeResult = Get-VolumeIdFromName $VolumeNames $volumeLunMapping
     $volumes = $volumeResult.Response
     $volumeNameMapping = $volumeResult.volumeNameMapping
-    Write-output "Volume Ids: $($volumes | ConvertTo-Json)"
+    #Write-output "Volume Ids: $($volumes | ConvertTo-Json)"
 
     #try {
     if($dblist.Length -gt 1) {
@@ -489,26 +503,41 @@ if(-not ([string]::IsNullOrEmpty($databaseName))) {
       }
                     
      #Quiesce the database(s)
-     Write-Output "Suspending database(s) $databaseName"
+    try {
+        Write-Output "Suspending database(s) $databaseName"
 
-    if($backup_type -eq 'SERVER') {
-        $suspenddatabases = Suspend-DatabasesForSnapshot @SQLParams
-    } else {
-    $SQLParams.Add("databaseList",$databaseList)
-        $suspenddatabases = Suspend-DatabasesForSnapshot @SQLParams
+        if($backup_type -eq 'SERVER') {
+            $suspenddatabases = Suspend-DatabasesForSnapshot @SQLParams
+        } else {
+        $SQLParams.Add("databaseList",$databaseList)
+            $suspenddatabases = Suspend-DatabasesForSnapshot @SQLParams
+        }
+
+        Write-Output $suspenddatabases
+    } catch {
+       Write-Output "Failed to suspend databases! retry after sometime"
+       exit 1
+    
     }
-
-       Write-Output $suspenddatabases
 
      #Create snapshot for all the volumes
      $timestamp = (Get-Date -Format "yyyyMMddHHmmss")
+
 
      foreach ($record in $volumes.records) {
            $volumeUUID = $record.uuid
            $volumeName = $record.name
            Write-output "Taking snapshot for $volumeName ($volumeUUID)"
            $snapshot = $snapshot_prefix+"_"+$timestamp
-           $snapshotResult = Create-ONTAPSnapshot $volumeUUID $volumeName $snapshot $snapshot_timeout
+           try {
+                $snapshotResult = Create-ONTAPSnapshot $volumeUUID $volumeName $snapshot $snapshot_timeout
+            } catch {
+                Write-Output "Snapshot failed for volume $volumeName. Aborting backup and resuming database(s)"
+                $SQLParams["Action"] = "resume"
+                Suspend-DatabasesForSnapshot @SQLParams
+                exit 1
+
+            }
 
         }
 
@@ -516,9 +545,9 @@ if(-not ([string]::IsNullOrEmpty($databaseName))) {
 
     $metabackup = $snapshot+'.bkm'
     if($backup_type -eq 'DATABASE') {
-      $sqlbackupquery = "BACKUP DATABASE ["+$databaseName+"] TO DISK = '"+$metabackup+"' WITH METADATA_ONLY, FORMAT;"
+      $sqlbackupquery = "BACKUP DATABASE "+$databaseList+" TO DISK = '"+$metabackup+"' WITH METADATA_ONLY, FORMAT;"
     } elseif($backup_type -eq 'GROUP') {
-        $sqlbackupquery = "BACKUP GROUP "+$databaseName+" TO DISK = '"+$metabackup+"' WITH METADATA_ONLY, FORMAT;"
+        $sqlbackupquery = "BACKUP GROUP "+$databaseList+" TO DISK = '"+$metabackup+"' WITH METADATA_ONLY, FORMAT;"
     } else{
         $sqlbackupquery = "BACKUP SERVER TO DISK = '"+$metabackup+"' WITH METADATA_ONLY, FORMAT;"
     }
@@ -526,9 +555,13 @@ if(-not ([string]::IsNullOrEmpty($databaseName))) {
     $Command.CommandText = $sqlbackupquery
     try {
         $sqlbackupresponse = $Command.ExecuteNonQuery();
-        Write-output $sqlbackupresponse
+        Write-output "Successfully backed up database(s) - $databaseName"
     } catch {
-          Write-Host "Failed to take metadata backup database(s) $databaseName for snapshot $snapshot!"
+          Write-Output "Failed to take metadata backup database(s) $databaseName for snapshot $snapshot!"
+          Write-Output "Resuming databases explicitly in case metadata backup failure failed to unfreeze"
+          $SQLParams["Action"] = "resume"
+          Suspend-DatabasesForSnapshot @SQLParams
+
           if ($sqlConn.State -eq [System.Data.ConnectionState]::Open) {
                         $sqlConn.Close()
                      }
@@ -557,3 +590,4 @@ return
 } catch {
 return $_.Exception.Message
 } 
+ 
